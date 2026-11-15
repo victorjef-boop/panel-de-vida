@@ -7,6 +7,8 @@ import { classifyEmails } from '@/lib/anthropic'
 import { revalidatePath } from 'next/cache'
 import { connection } from 'next/server'
 
+export const dynamic = 'force-dynamic'
+
 export default async function Home() {
   await connection()
 
