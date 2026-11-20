@@ -1,4 +1,6 @@
 
+
+Page · TSX
 import { createClient } from '@/lib/supabase/server'
 import { redirect } from 'next/navigation'
 import { getCalendarEvents } from '@/lib/google/calendar'
@@ -6,23 +8,23 @@ import { getUnreadThreads } from '@/lib/google/gmail'
 import { classifyEmails } from '@/lib/anthropic'
 import { revalidatePath } from 'next/cache'
 import { connection } from 'next/server'
-
+ 
 export const dynamic = 'force-dynamic'
-
+ 
 export default async function Home() {
   await connection()
-
+ 
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) redirect('/auth/login')
-
+ 
   const { data: tasks } = await supabase
     .from('tasks')
     .select('*')
     .eq('user_id', user.id)
     .neq('estado', 'completada')
     .order('fecha_limite', { ascending: true, nullsFirst: false })
-
+ 
   const [events, threads] = await Promise.all([
     getCalendarEvents(7),
     getUnreadThreads(),
@@ -31,22 +33,22 @@ export default async function Home() {
   const responder = classified.filter((e) => e.categoria === 'responder_hoy')
   const esperando = classified.filter((e) => e.categoria === 'esperando_respuesta')
   const informativos = classified.filter((e) => e.categoria === 'informativo')
-
+ 
   const today = new Date()
   today.setHours(0, 0, 0, 0)
   const todayStr = today.toISOString().split('T')[0]
-
-  const vencidas = tasks?.filter(t => t.fecha_limite && t.fecha_limite < todayStr) ?? []
-  const hoy = tasks?.filter(t => t.fecha_limite === todayStr) ?? []
-  const proximas = tasks?.filter(t => !t.fecha_limite || t.fecha_limite > todayStr) ?? []
-
+ 
+  const vencidas = tasks?.filter(t => t.fecha_limite && t.fecha_limite.slice(0, 10) < todayStr) ?? []
+  const hoy = tasks?.filter(t => t.fecha_limite && t.fecha_limite.slice(0, 10) === todayStr) ?? []
+  const proximas = tasks?.filter(t => !t.fecha_limite || t.fecha_limite.slice(0, 10) > todayStr) ?? []
+ 
   async function signOut() {
     'use server'
     const supabase = await createClient()
     await supabase.auth.signOut()
     redirect('/auth/login')
   }
-
+ 
   async function createTask(formData: FormData) {
     'use server'
     const supabase = await createClient()
@@ -65,7 +67,7 @@ export default async function Home() {
     })
     revalidatePath('/')
   }
-
+ 
   async function completeTask(formData: FormData) {
     'use server'
     const supabase = await createClient()
@@ -73,7 +75,7 @@ export default async function Home() {
     await supabase.from('tasks').update({ estado: 'completada' }).eq('id', id)
     revalidatePath('/')
   }
-
+ 
   return (
     <div className="min-h-screen bg-background p-6 max-w-2xl mx-auto space-y-10">
       <div className="flex items-center justify-between">
@@ -84,7 +86,7 @@ export default async function Home() {
           </button>
         </form>
       </div>
-
+ 
       {/* AGENDA */}
       <section className="space-y-3">
         <h2 className="text-lg font-medium">Agenda — próximos 7 días</h2>
@@ -116,7 +118,7 @@ export default async function Home() {
           </div>
         )}
       </section>
-
+ 
       {/* TAREAS */}
       <section className="space-y-4">
         <h2 className="text-lg font-medium">Tareas</h2>
@@ -136,7 +138,7 @@ export default async function Home() {
             Añadir
           </button>
         </form>
-
+ 
         {vencidas.length > 0 && (
           <div className="space-y-2">
             <p className="text-sm font-medium text-red-600">Vencidas ({vencidas.length})</p>
@@ -159,7 +161,7 @@ export default async function Home() {
           <p className="text-sm text-muted-foreground">No hay tareas pendientes.</p>
         )}
       </section>
-
+ 
       {/* CORREOS */}
       <section className="space-y-3">
         <h2 className="text-lg font-medium">Correos</h2>
@@ -195,7 +197,7 @@ export default async function Home() {
     </div>
   )
 }
-
+ 
 function TaskRow({ task, completeTask }: { task: any, completeTask: (fd: FormData) => Promise<void> }) {
   const prioColors: Record<string, string> = {
     alta: 'text-red-500',
@@ -214,7 +216,7 @@ function TaskRow({ task, completeTask }: { task: any, completeTask: (fd: FormDat
         <p className="text-sm">{task.titulo}</p>
         {task.fecha_limite && (
           <p className="text-xs text-muted-foreground">
-            {new Date(task.fecha_limite + 'T00:00:00').toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })}
+            {new Date(task.fecha_limite.slice(0, 10) + 'T00:00:00').toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })}
           </p>
         )}
       </div>
@@ -222,3 +224,7 @@ function TaskRow({ task, completeTask }: { task: any, completeTask: (fd: FormDat
     </div>
   )
 }
+ 
+Claude ha terminado la respuesta
+
+        
