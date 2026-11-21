@@ -221,7 +221,3 @@ function TaskRow({ task, completeTask }: { task: any, completeTask: (fd: FormDat
     </div>
   )
 }
- 
-Claude ha terminado la respuesta
-
-        
