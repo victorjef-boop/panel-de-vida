@@ -12,9 +12,6 @@ export type Movimiento = {
   tipo: 'ingreso' | 'gasto'
 }
 
-/**
- * Navega la ruta de carpetas en Drive y devuelve el ID de la última.
- */
 async function obtenerIdCarpeta(
   drive: ReturnType<typeof google.drive>,
   ruta: string
@@ -36,13 +33,9 @@ async function obtenerIdCarpeta(
   return parentId
 }
 
-/**
- * Convierte una fecha Excel (número de serie o string dd/mm/yyyy) a YYYY-MM-DD.
- */
 function parsearFecha(val: unknown): string | null {
   if (!val) return null
 
-  // Número de serie Excel
   if (typeof val === 'number') {
     const date = XLSX.SSF.parse_date_code(val)
     if (!date) return null
@@ -51,57 +44,88 @@ function parsearFecha(val: unknown): string | null {
     return `${date.y}-${m}-${d}`
   }
 
-  // String dd/mm/yyyy o dd-mm-yyyy
   if (typeof val === 'string') {
-    const match = val.match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})/)
+    // dd/mm/yyyy o dd-mm-yyyy
+    const match = val.trim().match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})/)
     if (match) return `${match[3]}-${match[2]}-${match[1]}`
   }
 
   return null
 }
 
+function parsearImporte(val: unknown): number {
+  if (typeof val === 'number') return val
+  if (typeof val === 'string') {
+    // quitar puntos de miles y cambiar coma decimal
+    const limpio = val.trim().replace(/\./g, '').replace(',', '.')
+    return parseFloat(limpio) || 0
+  }
+  return 0
+}
+
 /**
- * Parsea una hoja de cálculo del extracto CaixaBank.
- * Columnas esperadas (índice 0):
- *   0: Número de cuenta
- *   3: F. Operación
- *   5: Ingreso (+)
- *   6: Gasto (-)
- *  13: Concepto complementario 1  (descripción del comercio)
- *   9: Concepto común             (fallback)
+ * Parsea extracto formato HTML-XLS (Openbank, algunos bancos españoles).
+ * Columnas: Fecha Operación | Fecha Valor | Concepto | Importe | Saldo
+ * SheetJS lee el HTML como tabla, con celdas vacías intercaladas (separadores).
  */
-function parsearHojaCaixabank(sheet: XLSX.WorkSheet): Movimiento[] {
-  const rows: unknown[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' })
+function parsearFormatoHTML(rows: unknown[][]): Movimiento[] {
   const movimientos: Movimiento[] = []
 
   for (const row of rows) {
-    if (!Array.isArray(row) || row.length < 7) continue
+    if (!Array.isArray(row)) continue
+    // Buscar una celda con fecha en cualquier posición
+    // La fila tiene separadores vacíos: [sep, fecha, sep, fechaValor, sep, concepto, sep, importe, sep, saldo]
+    // O en formato compacto sin separadores
 
-    const cuenta = String(row[0] ?? '').trim()
-    // Saltamos filas de cabecera o vacías
-    if (!cuenta || cuenta.startsWith('Número') || cuenta.startsWith('MOVIMIENTOS')) continue
-    // La cuenta CaixaBank tiene espacios: "2100 3115 52 ..."
-    if (!cuenta.includes(' ') && cuenta.length < 10) continue
+    // Buscar índice de la primera fecha
+    let fechaIdx = -1
+    for (let i = 0; i < row.length; i++) {
+      if (parsearFecha(row[i]) !== null) {
+        fechaIdx = i
+        break
+      }
+    }
+    if (fechaIdx === -1) continue
 
-    const fecha = parsearFecha(row[3])
+    const fecha = parsearFecha(row[fechaIdx])
     if (!fecha) continue
 
-    const ingresoRaw = row[5]
-    const gastoRaw = row[6]
-    const concepto13 = String(row[13] ?? '').replace(/\s+/g, ' ').trim()
-    const concepto9 = String(row[9] ?? '').replace(/\s+/g, ' ').trim()
-    const concepto = concepto13 || concepto9 || 'Sin concepto'
+    // Buscar concepto e importe después de la fecha
+    // Probamos con y sin separadores intercalados
+    let concepto = ''
+    let importe = 0
+    let encontrado = false
 
-    const ingreso = typeof ingresoRaw === 'number' ? ingresoRaw : parseFloat(String(ingresoRaw).replace(',', '.')) || 0
-    const gasto = typeof gastoRaw === 'number' ? gastoRaw : parseFloat(String(gastoRaw).replace(',', '.')) || 0
+    // Patrón con separadores: fecha, sep, fechaValor, sep, concepto, sep, importe
+    // fechaIdx+2 = fechaValor, fechaIdx+4 = concepto, fechaIdx+6 = importe
+    if (fechaIdx + 6 < row.length) {
+      const c = String(row[fechaIdx + 4] ?? '').trim()
+      const imp = parsearImporte(row[fechaIdx + 6])
+      if (c && imp !== 0) {
+        concepto = c
+        importe = imp
+        encontrado = true
+      }
+    }
 
-    if (!ingreso && !gasto) continue
+    // Patrón sin separadores: fecha, fechaValor, concepto, importe
+    if (!encontrado && fechaIdx + 3 < row.length) {
+      const c = String(row[fechaIdx + 2] ?? '').trim()
+      const imp = parsearImporte(row[fechaIdx + 3])
+      if (c && imp !== 0) {
+        concepto = c
+        importe = imp
+        encontrado = true
+      }
+    }
+
+    if (!encontrado || !concepto) continue
 
     movimientos.push({
       fecha,
-      concepto,
-      importe: ingreso > 0 ? ingreso : -gasto,
-      tipo: ingreso > 0 ? 'ingreso' : 'gasto',
+      concepto: concepto.replace(/\s+/g, ' ').trim(),
+      importe,
+      tipo: importe >= 0 ? 'ingreso' : 'gasto',
     })
   }
 
@@ -109,9 +133,73 @@ function parsearHojaCaixabank(sheet: XLSX.WorkSheet): Movimiento[] {
 }
 
 /**
- * Descarga y parsea todos los archivos XLS de la carpeta Drive.
- * Devuelve movimientos de todos los meses, ordenados por fecha desc.
+ * Parsea extracto formato BIFF real (CaixaBank TT*.XLS).
+ * Columnas fijas (índice base 0):
+ *   0: Número de cuenta  3: F.Operación  5: Ingreso  6: Gasto
+ *   9: Concepto común   13: Concepto complementario 1
  */
+function parsearFormatoBIFF(rows: unknown[][]): Movimiento[] {
+  const movimientos: Movimiento[] = []
+
+  for (const row of rows) {
+    if (!Array.isArray(row) || row.length < 7) continue
+
+    // Detectar fila de datos: columna 3 debe tener fecha
+    const fecha = parsearFecha(row[3])
+    if (!fecha) continue
+
+    // Saltar si columna 0 es cabecera o no parece cuenta
+    const col0 = String(row[0] ?? '').trim()
+    if (col0.startsWith('N') && col0.length < 5) continue  // "Nº" cabecera
+    if (col0.startsWith('MOVIMIENTOS')) continue
+
+    const ingresoRaw = row[5]
+    const gastoRaw = row[6]
+    const concepto13 = String(row[13] ?? '').replace(/\s+/g, ' ').trim()
+    const concepto9 = String(row[9] ?? '').replace(/\s+/g, ' ').trim()
+    const concepto = concepto13 || concepto9 || 'Sin concepto'
+
+    const ingreso = parsearImporte(ingresoRaw)
+    const gasto = parsearImporte(gastoRaw)
+
+    if (!ingreso && !gasto) continue
+
+    const importe = ingreso > 0 ? ingreso : -Math.abs(gasto)
+
+    movimientos.push({
+      fecha,
+      concepto,
+      importe,
+      tipo: importe >= 0 ? 'ingreso' : 'gasto',
+    })
+  }
+
+  return movimientos
+}
+
+function parsearHoja(sheet: XLSX.WorkSheet): Movimiento[] {
+  const rows: unknown[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' })
+  if (rows.length === 0) return []
+
+  // Detectar formato: BIFF tiene columna 0 con número de cuenta (largo)
+  // HTML tiene columnas con separadores y la fecha en columna 1 o similar
+  // Heurística: si la primera fila con fecha tiene fecha en col 3, es BIFF
+  for (const row of rows) {
+    if (!Array.isArray(row)) continue
+    if (parsearFecha(row[3]) !== null) {
+      return parsearFormatoBIFF(rows)
+    }
+    // Si tiene fecha en col 1 o más adelante con separadores, es HTML
+    for (let i = 0; i < Math.min(row.length, 10); i++) {
+      if (parsearFecha(row[i]) !== null) {
+        return parsearFormatoHTML(rows)
+      }
+    }
+  }
+
+  return []
+}
+
 export async function getMovimientosDrive(): Promise<{
   movimientos: Movimiento[]
   archivos: string[]
@@ -134,7 +222,6 @@ export async function getMovimientosDrive(): Promise<{
       }
     }
 
-    // Listar archivos XLS/XLSX en la carpeta
     const listaRes = await drive.files.list({
       q: `'${carpetaId}' in parents and trashed=false and (name contains '.xls' or name contains '.XLS' or name contains '.xlsx')`,
       fields: 'files(id, name)',
@@ -158,23 +245,35 @@ export async function getMovimientosDrive(): Promise<{
       if (!archivo.id) continue
       nombresArchivos.push(archivo.name ?? archivo.id)
 
-      // Descargar el binario del archivo
       const res = await drive.files.get(
         { fileId: archivo.id, alt: 'media' },
         { responseType: 'arraybuffer' }
       )
 
       const buffer = Buffer.from(res.data as ArrayBuffer)
-      const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: false })
 
-      for (const sheetName of workbook.SheetNames) {
-        const sheet = workbook.Sheets[sheetName]
-        const movs = parsearHojaCaixabank(sheet)
-        todosMovimientos.push(...movs)
+      // Detectar si es HTML disfrazado de XLS
+      const inicio = buffer.slice(0, 20).toString('utf8').trimStart()
+      let movs: Movimiento[] = []
+
+      if (inicio.startsWith('<') || inicio.startsWith('<!')) {
+        // Es HTML: parsear como tabla HTML
+        const html = buffer.toString('latin1')
+        const workbook = XLSX.read(html, { type: 'string' })
+        for (const sheetName of workbook.SheetNames) {
+          movs.push(...parsearHoja(workbook.Sheets[sheetName]))
+        }
+      } else {
+        // Es binario real
+        const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: false })
+        for (const sheetName of workbook.SheetNames) {
+          movs.push(...parsearHoja(workbook.Sheets[sheetName]))
+        }
       }
+
+      todosMovimientos.push(...movs)
     }
 
-    // Ordenar por fecha descendente
     todosMovimientos.sort((a, b) => b.fecha.localeCompare(a.fecha))
 
     return { movimientos: todosMovimientos, archivos: nombresArchivos }
