@@ -9,7 +9,7 @@ export async function POST(request: Request) {
     provider: 'google',
     options: {
       redirectTo: `${origin}/auth/callback`,
-      scopes: 'email profile https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/gmail.readonly',
+      scopes: 'email profile https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/drive.readonly',
       queryParams: {
         access_type: 'offline',
         prompt: 'consent',

@@ -1,7 +1,8 @@
 import { google } from 'googleapis'
 import { getGoogleTokens } from './auth'
+import * as XLSX from 'xlsx'
 
-// Nombre de la carpeta en Google Drive donde subes los extractos
+// Carpeta en Google Drive donde subes los extractos XLS del banco
 const CARPETA_EXTRACTOS = 'Panel de Vida/extractos'
 
 export type Movimiento = {
@@ -9,20 +10,22 @@ export type Movimiento = {
   concepto: string
   importe: number      // positivo = ingreso, negativo = gasto
   tipo: 'ingreso' | 'gasto'
-  referencia?: string
 }
 
 /**
- * Busca la carpeta por ruta (crea la estructura si no existe) y devuelve su ID.
+ * Navega la ruta de carpetas en Drive y devuelve el ID de la última.
  */
-async function obtenerIdCarpeta(drive: ReturnType<typeof google.drive>, ruta: string): Promise<string | null> {
+async function obtenerIdCarpeta(
+  drive: ReturnType<typeof google.drive>,
+  ruta: string
+): Promise<string | null> {
   const partes = ruta.split('/')
   let parentId = 'root'
 
   for (const parte of partes) {
     const res = await drive.files.list({
       q: `name='${parte}' and mimeType='application/vnd.google-apps.folder' and '${parentId}' in parents and trashed=false`,
-      fields: 'files(id, name)',
+      fields: 'files(id)',
       spaces: 'drive',
     })
     const carpeta = res.data.files?.[0]
@@ -34,43 +37,69 @@ async function obtenerIdCarpeta(drive: ReturnType<typeof google.drive>, ruta: st
 }
 
 /**
- * Parsea una fecha del formato dd/mm/yyyy o dd-mm-yyyy a YYYY-MM-DD.
+ * Convierte una fecha Excel (número de serie o string dd/mm/yyyy) a YYYY-MM-DD.
  */
-function parsearFecha(str: string): string {
-  const [d, m, y] = str.includes('/') ? str.split('/') : str.split('-')
-  return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`
+function parsearFecha(val: unknown): string | null {
+  if (!val) return null
+
+  // Número de serie Excel
+  if (typeof val === 'number') {
+    const date = XLSX.SSF.parse_date_code(val)
+    if (!date) return null
+    const m = String(date.m).padStart(2, '0')
+    const d = String(date.d).padStart(2, '0')
+    return `${date.y}-${m}-${d}`
+  }
+
+  // String dd/mm/yyyy o dd-mm-yyyy
+  if (typeof val === 'string') {
+    const match = val.match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})/)
+    if (match) return `${match[3]}-${match[2]}-${match[1]}`
+  }
+
+  return null
 }
 
 /**
- * Parsea el contenido TSV de un extracto bancario CaixaBank (formato XLS exportado).
- * Columnas relevantes: F. Operación (col 3), Ingreso (col 5), Gasto (col 6), Concepto complementario 1 (col 13)
+ * Parsea una hoja de cálculo del extracto CaixaBank.
+ * Columnas esperadas (índice 0):
+ *   0: Número de cuenta
+ *   3: F. Operación
+ *   5: Ingreso (+)
+ *   6: Gasto (-)
+ *  13: Concepto complementario 1  (descripción del comercio)
+ *   9: Concepto común             (fallback)
  */
-function parsearExtractoCaixabank(tsv: string): Movimiento[] {
-  const lineas = tsv.split('\n').filter(l => l.trim())
+function parsearHojaCaixabank(sheet: XLSX.WorkSheet): Movimiento[] {
+  const rows: unknown[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' })
   const movimientos: Movimiento[] = []
 
-  for (const linea of lineas) {
-    const cols = linea.split('\t')
-    // Saltamos cabeceras y filas sin número de cuenta
-    if (!cols[0]?.trim() || !cols[0].includes(' ') || cols[0].trim().startsWith('Número')) continue
-    if (cols.length < 7) continue
+  for (const row of rows) {
+    if (!Array.isArray(row) || row.length < 7) continue
 
-    const fechaRaw = cols[3]?.trim()
-    const ingresoRaw = cols[5]?.trim()
-    const gastoRaw = cols[6]?.trim()
-    // Concepto: tomamos el complementario 1 (col 13) si existe, si no el común (col 9)
-    const conceptoRaw = (cols[13]?.trim() || cols[9]?.trim() || '').replace(/\s+/g, ' ').trim()
+    const cuenta = String(row[0] ?? '').trim()
+    // Saltamos filas de cabecera o vacías
+    if (!cuenta || cuenta.startsWith('Número') || cuenta.startsWith('MOVIMIENTOS')) continue
+    // La cuenta CaixaBank tiene espacios: "2100 3115 52 ..."
+    if (!cuenta.includes(' ') && cuenta.length < 10) continue
 
-    if (!fechaRaw || !fechaRaw.match(/\d{2}[\/\-]\d{2}[\/\-]\d{4}/)) continue
+    const fecha = parsearFecha(row[3])
+    if (!fecha) continue
 
-    const ingreso = ingresoRaw ? parseFloat(ingresoRaw.replace(',', '.')) : 0
-    const gasto = gastoRaw ? parseFloat(gastoRaw.replace(',', '.')) : 0
+    const ingresoRaw = row[5]
+    const gastoRaw = row[6]
+    const concepto13 = String(row[13] ?? '').replace(/\s+/g, ' ').trim()
+    const concepto9 = String(row[9] ?? '').replace(/\s+/g, ' ').trim()
+    const concepto = concepto13 || concepto9 || 'Sin concepto'
+
+    const ingreso = typeof ingresoRaw === 'number' ? ingresoRaw : parseFloat(String(ingresoRaw).replace(',', '.')) || 0
+    const gasto = typeof gastoRaw === 'number' ? gastoRaw : parseFloat(String(gastoRaw).replace(',', '.')) || 0
 
     if (!ingreso && !gasto) continue
 
     movimientos.push({
-      fecha: parsearFecha(fechaRaw),
-      concepto: conceptoRaw || 'Sin concepto',
+      fecha,
+      concepto,
       importe: ingreso > 0 ? ingreso : -gasto,
       tipo: ingreso > 0 ? 'ingreso' : 'gasto',
     })
@@ -80,13 +109,19 @@ function parsearExtractoCaixabank(tsv: string): Movimiento[] {
 }
 
 /**
- * Descarga y parsea todos los XLS de extractos desde Google Drive.
- * Devuelve los movimientos de todos los archivos encontrados, ordenados por fecha desc.
+ * Descarga y parsea todos los archivos XLS de la carpeta Drive.
+ * Devuelve movimientos de todos los meses, ordenados por fecha desc.
  */
-export async function getMovimientosDrive(): Promise<{ movimientos: Movimiento[]; archivos: string[]; error?: string }> {
+export async function getMovimientosDrive(): Promise<{
+  movimientos: Movimiento[]
+  archivos: string[]
+  error?: string
+}> {
   try {
     const auth = await getGoogleTokens()
-    if (!auth) return { movimientos: [], archivos: [], error: 'No autenticado con Google' }
+    if (!auth) {
+      return { movimientos: [], archivos: [], error: 'No autenticado con Google' }
+    }
 
     const drive = google.drive({ version: 'v3', auth })
 
@@ -101,7 +136,7 @@ export async function getMovimientosDrive(): Promise<{ movimientos: Movimiento[]
 
     // Listar archivos XLS/XLSX en la carpeta
     const listaRes = await drive.files.list({
-      q: `'${carpetaId}' in parents and trashed=false and (name contains '.xls' or name contains '.XLS')`,
+      q: `'${carpetaId}' in parents and trashed=false and (name contains '.xls' or name contains '.XLS' or name contains '.xlsx')`,
       fields: 'files(id, name)',
       orderBy: 'name',
       spaces: 'drive',
@@ -109,7 +144,11 @@ export async function getMovimientosDrive(): Promise<{ movimientos: Movimiento[]
 
     const archivos = listaRes.data.files ?? []
     if (archivos.length === 0) {
-      return { movimientos: [], archivos: [], error: `No hay archivos XLS en "${CARPETA_EXTRACTOS}"` }
+      return {
+        movimientos: [],
+        archivos: [],
+        error: `No hay archivos XLS en "${CARPETA_EXTRACTOS}". Sube los extractos mensuales del banco.`,
+      }
     }
 
     const nombresArchivos: string[] = []
@@ -119,21 +158,18 @@ export async function getMovimientosDrive(): Promise<{ movimientos: Movimiento[]
       if (!archivo.id) continue
       nombresArchivos.push(archivo.name ?? archivo.id)
 
-      // Exportar como TSV para parsear sin librerías de Excel
-      const exportRes = await drive.files.export(
-        { fileId: archivo.id, mimeType: 'text/tab-separated-values' },
-        { responseType: 'text' }
-      ).catch(async () => {
-        // Si no es un Google Sheet, descargarlo directamente como texto
-        return drive.files.get(
-          { fileId: archivo.id, alt: 'media' },
-          { responseType: 'text' }
-        )
-      })
+      // Descargar el binario del archivo
+      const res = await drive.files.get(
+        { fileId: archivo.id, alt: 'media' },
+        { responseType: 'arraybuffer' }
+      )
 
-      const contenido = exportRes.data as string
-      if (contenido) {
-        const movs = parsearExtractoCaixabank(contenido)
+      const buffer = Buffer.from(res.data as ArrayBuffer)
+      const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: false })
+
+      for (const sheetName of workbook.SheetNames) {
+        const sheet = workbook.Sheets[sheetName]
+        const movs = parsearHojaCaixabank(sheet)
         todosMovimientos.push(...movs)
       }
     }
