@@ -5,6 +5,7 @@ import { getUnreadThreads } from '@/lib/google/gmail'
 import { classifyEmails } from '@/lib/anthropic'
 import { revalidatePath } from 'next/cache'
 import { connection } from 'next/server'
+import Link from 'next/link'
  
 export const dynamic = 'force-dynamic'
  
@@ -84,6 +85,25 @@ export default async function Home() {
         </form>
       </div>
  
+      {/* MÓDULOS */}
+      <section className="grid grid-cols-3 gap-3">
+        <Link href="/finanzas" className="p-4 border border-border rounded-md hover:bg-muted transition-colors space-y-1">
+          <p className="text-lg">💰</p>
+          <p className="text-sm font-medium">Finanzas</p>
+          <p className="text-xs text-muted-foreground">Inversiones, ahorro y gastos</p>
+        </Link>
+        <Link href="/seguros" className="p-4 border border-border rounded-md hover:bg-muted transition-colors space-y-1">
+          <p className="text-lg">🛡️</p>
+          <p className="text-sm font-medium">Seguros</p>
+          <p className="text-xs text-muted-foreground">Pólizas y renovaciones</p>
+        </Link>
+        <Link href="/documentos" className="p-4 border border-border rounded-md hover:bg-muted transition-colors space-y-1">
+          <p className="text-lg">📄</p>
+          <p className="text-sm font-medium">Documentos</p>
+          <p className="text-xs text-muted-foreground">ITV, recibos y contratos</p>
+        </Link>
+      </section>
+
       {/* AGENDA */}
       <section className="space-y-3">
         <h2 className="text-lg font-medium">Agenda — próximos 7 días</h2>
