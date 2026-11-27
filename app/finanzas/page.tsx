@@ -5,10 +5,28 @@ import { getMovimientosDrive } from '@/lib/google/drive'
 
 export const dynamic = 'force-dynamic'
 
-export default async function FinanzasPage() {
+function mesesDisponibles(movimientos: { fecha: string }[]): string[] {
+  const set = new Set<string>()
+  for (const m of movimientos) {
+    set.add(m.fecha.slice(0, 7)) // YYYY-MM
+  }
+  return Array.from(set).sort((a, b) => b.localeCompare(a)) // más reciente primero
+}
+
+function formatearMes(mes: string): string {
+  const [year, month] = mes.split('-')
+  const fecha = new Date(Number(year), Number(month) - 1, 1)
+  return fecha.toLocaleDateString('es-ES', { month: 'long', year: 'numeric' })
+}
+
+type SearchParams = Promise<{ mes?: string }>
+
+export default async function FinanzasPage({ searchParams }: { searchParams: SearchParams }) {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) redirect('/auth/login')
+
+  const params = await searchParams
 
   const [
     { data: inversiones },
@@ -27,10 +45,17 @@ export default async function FinanzasPage() {
   const totalAhorro = (cuentas ?? []).filter(c => c.activa).reduce((sum, c) => sum + (c.saldo ?? 0), 0)
   const totalPatrimonio = totalInversiones + totalAhorro
 
-  // Gastos del mes actual desde Drive
+  // Meses disponibles en los extractos
+  const meses = mesesDisponibles(movimientos)
+
+  // Mes seleccionado: el que venga en ?mes=, si no el más reciente disponible, si no el mes actual
   const ahora = new Date()
   const mesActual = `${ahora.getFullYear()}-${String(ahora.getMonth() + 1).padStart(2, '0')}`
-  const gastosMes = movimientos.filter(m => m.tipo === 'gasto' && m.fecha.startsWith(mesActual))
+  const mesSeleccionado = params.mes && meses.includes(params.mes)
+    ? params.mes
+    : (meses[0] ?? mesActual)
+
+  const gastosMes = movimientos.filter(m => m.tipo === 'gasto' && m.fecha.startsWith(mesSeleccionado))
   const totalGastosMes = gastosMes.reduce((sum, m) => sum + Math.abs(m.importe), 0)
 
   // Categorización automática por concepto
@@ -150,14 +175,35 @@ export default async function FinanzasPage() {
 
       {/* GASTOS DESDE DRIVE */}
       <section className="space-y-3">
-        <h2 className="text-lg font-medium">
-          Gastos este mes
-          {totalGastosMes > 0 && (
-            <span className="ml-2 text-base font-normal text-muted-foreground">
-              {totalGastosMes.toLocaleString('es-ES', { style: 'currency', currency: 'EUR' })}
-            </span>
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <h2 className="text-lg font-medium">
+            Gastos
+            {totalGastosMes > 0 && (
+              <span className="ml-2 text-base font-normal text-muted-foreground">
+                {totalGastosMes.toLocaleString('es-ES', { style: 'currency', currency: 'EUR' })}
+              </span>
+            )}
+          </h2>
+
+          {/* Selector de mes — solo si hay datos */}
+          {meses.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {meses.map(mes => (
+                <Link
+                  key={mes}
+                  href={`/finanzas?mes=${mes}`}
+                  className={`px-2 py-1 text-xs rounded-md border transition-colors ${
+                    mes === mesSeleccionado
+                      ? 'bg-foreground text-background border-foreground'
+                      : 'border-border text-muted-foreground hover:text-foreground hover:border-foreground'
+                  }`}
+                >
+                  {formatearMes(mes)}
+                </Link>
+              ))}
+            </div>
           )}
-        </h2>
+        </div>
 
         {errorDrive ? (
           <div className="p-3 border border-orange-200 rounded-md bg-orange-50 space-y-1">
@@ -187,7 +233,9 @@ export default async function FinanzasPage() {
             )}
 
             {gastosMes.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No hay gastos este mes.</p>
+              <p className="text-sm text-muted-foreground">
+                No hay gastos en {formatearMes(mesSeleccionado)}.
+              </p>
             ) : (
               <div className="space-y-2">
                 {gastosMes.slice(0, 15).map((m, i) => (
